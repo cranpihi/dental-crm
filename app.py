@@ -1,194 +1,240 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 from datetime import datetime
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="DentalCare CRM", page_icon="🦷", layout="wide")
+st.set_page_config(page_title="DentalCare SQL", page_icon="🦷", layout="wide")
 
-# --- ESTILOS CSS PERSONALIZADOS (Para que se vea más bonito) ---
-st.markdown("""
-    <style>
-    .big-font { font-size:20px !important; font-weight: bold; }
-    .stButton>button { width: 100%; border-radius: 10px; }
-    .metric-card { background-color: #f0f2f6; padding: 20px; border-radius: 10px; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- GESTIÓN DE BASE DE DATOS (SQLite) ---
 
-# --- GESTIÓN DEL ESTADO (Base de Datos Simulada) ---
-if 'patients' not in st.session_state:
-    st.session_state.patients = [
-        {"id": 1, "name": "Ana García", "age": 28, "phone": "+56 9 1234 5678", "status": "Activo", "allergies": ["Penicilina"], "history": []},
-        {"id": 2, "name": "Carlos Pérez", "age": 35, "phone": "+56 9 8765 4321", "status": "Pendiente", "allergies": [], "history": []},
-        {"id": 3, "name": "María Rodríguez", "age": 42, "phone": "+56 9 1122 3344", "status": "Activo", "allergies": ["Latex", "Polen"], "history": []},
-    ]
+def init_db():
+    """Inicializa la base de datos y crea las tablas si no existen."""
+    conn = sqlite3.connect('dental.db', check_same_thread=False)
+    c = conn.cursor()
+    
+    # Tabla de Pacientes
+    c.execute('''CREATE TABLE IF NOT EXISTS patients
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  name TEXT, 
+                  age INTEGER, 
+                  phone TEXT, 
+                  status TEXT, 
+                  allergies TEXT, 
+                  created_at DATE)''')
+    
+    # Tabla de Historial/Evolución
+    c.execute('''CREATE TABLE IF NOT EXISTS history
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  patient_id INTEGER, 
+                  date TEXT, 
+                  treatment TEXT, 
+                  doctor TEXT,
+                  FOREIGN KEY(patient_id) REFERENCES patients(id))''')
 
-if 'appointments' not in st.session_state:
-    st.session_state.appointments = [
-        {"id": 1, "patient": "Ana García", "time": "09:00", "type": "Limpieza", "status": "Confirmado"},
-        {"id": 2, "patient": "Carlos Pérez", "time": "10:30", "type": "Revisión", "status": "En Espera"},
-    ]
+    # Tabla de Dientes (Odontograma)
+    # Guarda el estado de cada diente para cada paciente
+    c.execute('''CREATE TABLE IF NOT EXISTS teeth
+                 (patient_id INTEGER, 
+                  tooth_id INTEGER, 
+                  status TEXT,
+                  PRIMARY KEY (patient_id, tooth_id),
+                  FOREIGN KEY(patient_id) REFERENCES patients(id))''')
+    
+    conn.commit()
+    return conn
 
-# --- DENTIGRAMA / ODONTOGRAMA (Lógica en Python) ---
-# Inicializamos el estado de los dientes si no existe
-if 'teeth_status' not in st.session_state:
-    # 32 dientes, estado inicial 'Sano'
-    st.session_state.teeth_status = {i: "Sano" for i in range(1, 33)}
+# Conectamos a la DB al iniciar
+conn = init_db()
 
-def update_tooth(tooth_id, new_status):
-    st.session_state.teeth_status[tooth_id] = new_status
+# --- FUNCIONES CRUD (Crear, Leer, Actualizar) ---
 
-# --- FUNCIONES DE VISTA ---
+def add_patient(name, age, phone, allergies):
+    c = conn.cursor()
+    c.execute("INSERT INTO patients (name, age, phone, status, allergies, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+              (name, age, phone, "Activo", allergies, datetime.now().date()))
+    conn.commit()
+    return c.lastrowid
+
+def get_all_patients():
+    return pd.read_sql("SELECT * FROM patients", conn)
+
+def add_history_note(patient_id, note, doctor="Dr. Principal"):
+    c = conn.cursor()
+    date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    c.execute("INSERT INTO history (patient_id, date, treatment, doctor) VALUES (?, ?, ?, ?)",
+              (patient_id, date_str, note, doctor))
+    conn.commit()
+
+def get_patient_history(patient_id):
+    return pd.read_sql("SELECT * FROM history WHERE patient_id = ? ORDER BY id DESC", conn, params=(patient_id,))
+
+def get_tooth_status(patient_id, tooth_id):
+    c = conn.cursor()
+    c.execute("SELECT status FROM teeth WHERE patient_id = ? AND tooth_id = ?", (patient_id, tooth_id))
+    result = c.fetchone()
+    if result:
+        return result[0]
+    return "Sano" # Valor por defecto
+
+def update_tooth_status(patient_id, tooth_id, status):
+    c = conn.cursor()
+    # Usamos REPLACE para insertar o actualizar si ya existe
+    c.execute("REPLACE INTO teeth (patient_id, tooth_id, status) VALUES (?, ?, ?)", 
+              (patient_id, tooth_id, status))
+    conn.commit()
+
+# --- INTERFAZ DE USUARIO ---
 
 def show_dashboard():
-    st.title("📊 Dashboard DentalCare")
+    st.title("📊 Dashboard DentalCare (Versión DB)")
     
-    # Métricas
+    df_patients = get_all_patients()
+    total_patients = len(df_patients)
+    
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric(label="Pacientes Totales", value=len(st.session_state.patients), delta="1 nuevo hoy")
+        st.metric(label="Pacientes Registrados", value=total_patients)
     with col2:
-        st.metric(label="Citas Hoy", value=len(st.session_state.appointments))
+        st.metric(label="Citas Hoy", value="3") # Simulado para el ejemplo
     with col3:
-        st.metric(label="Ingresos Mes", value="$4.5M", delta="+12%")
-
-    st.divider()
-
-    # Citas Rápidas
-    st.subheader("📅 Próximas Citas")
-    df_appointments = pd.DataFrame(st.session_state.appointments)
-    st.dataframe(df_appointments, use_container_width=True, hide_index=True)
+        st.info("Base de datos: Conectada ✅")
 
 def show_patients():
     st.title("👥 Gestión de Pacientes")
     
-    col_search, col_add = st.columns([3, 1])
-    
-    with col_search:
-        search_term = st.text_input("🔍 Buscar paciente por nombre", "")
-    
-    with col_add:
-        if st.button("➕ Nuevo Paciente"):
-            st.session_state.show_add_modal = True
+    # Formulario para agregar (en un expander para que no ocupe espacio siempre)
+    with st.expander("➕ Agregar Nuevo Paciente"):
+        with st.form("new_patient"):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                new_name = st.text_input("Nombre Completo")
+                new_age = st.number_input("Edad", min_value=0, max_value=120, value=30)
+            with col_b:
+                new_phone = st.text_input("Teléfono")
+                new_allergies = st.text_input("Alergias (separar por comas)")
+            
+            submitted = st.form_submit_button("Guardar Paciente")
+            if submitted and new_name:
+                add_patient(new_name, new_age, new_phone, new_allergies)
+                st.success("Paciente guardado en base de datos!")
+                st.rerun()
 
-    # Filtrado
-    filtered_patients = [p for p in st.session_state.patients if search_term.lower() in p['name'].lower()]
-    
-    # Mostrar lista como tabla interactiva
-    if filtered_patients:
-        df = pd.DataFrame(filtered_patients)
-        # Seleccionar columnas a mostrar
-        display_df = df[['id', 'name', 'phone', 'status', 'last_visit' if 'last_visit' in df else 'status']] 
+    # Mostrar tabla
+    df = get_all_patients()
+    if not df.empty:
+        st.dataframe(df[['id', 'name', 'age', 'phone', 'status']], use_container_width=True, hide_index=True)
         
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        # Selector para ir a detalle
+        patient_options = df.set_index('id')['name'].to_dict()
+        selected_id = st.selectbox("Selecciona ID de paciente para abrir Ficha:", 
+                                   options=[None] + list(patient_options.keys()), 
+                                   format_func=lambda x: f"{x} - {patient_options[x]}" if x else "Seleccionar...")
         
-        # Selector para ir a la ficha
-        patient_names = [p['name'] for p in filtered_patients]
-        selected_patient_name = st.selectbox("Selecciona un paciente para ver su Ficha Clínica:", ["Seleccionar..."] + patient_names)
-        
-        if selected_patient_name != "Seleccionar...":
-            # Encontrar el objeto paciente completo
-            selected_patient = next(p for p in filtered_patients if p['name'] == selected_patient_name)
-            st.session_state.current_patient = selected_patient
+        if selected_id:
+            st.session_state.current_patient_id = selected_id
             st.session_state.view = 'detail'
             st.rerun()
+    else:
+        st.info("No hay pacientes. Agrega uno arriba.")
 
 def show_patient_detail():
-    patient = st.session_state.current_patient
+    # Recuperar datos frescos de la DB
+    p_id = st.session_state.current_patient_id
+    c = conn.cursor()
+    c.execute("SELECT * FROM patients WHERE id = ?", (p_id,))
+    patient = c.fetchone()
+    # Mapear resultado de tupla a nombres (id, name, age, phone, status, allergies...)
     
     if st.button("⬅️ Volver a la lista"):
         st.session_state.view = 'patients'
         st.rerun()
 
-    st.title(f"Ficha Clínica: {patient['name']}")
+    st.title(f"Ficha Clínica: {patient[1]}") # patient[1] es el nombre
     
-    col_info, col_clinical = st.columns([1, 2])
+    col_izq, col_der = st.columns([1, 2])
 
-    with col_info:
-        st.info(f"**Edad:** {patient['age']} años")
-        st.success(f"**Estado:** {patient['status']}")
-        st.write(f"📞 **Tel:** {patient['phone']}")
+    with col_izq:
+        st.markdown("### Datos Personales")
+        st.write(f"**Edad:** {patient[2]}")
+        st.write(f"**Teléfono:** {patient[3]}")
         
-        st.markdown("### ⚠️ Alertas Médicas")
-        if patient['allergies']:
-            for allergy in patient['allergies']:
-                st.error(f"Alergia: {allergy}")
+        st.markdown("### ⚠️ Alertas")
+        allergies = patient[5]
+        if allergies:
+            st.error(f"Alergias: {allergies}")
         else:
-            st.write("No registra alergias.")
+            st.success("Sin alergias conocidas")
 
-    with col_clinical:
-        tab1, tab2 = st.tabs(["🦷 Odontograma", "📝 Historial"])
+    with col_der:
+        tab_odonto, tab_histo = st.tabs(["🦷 Odontograma", "📝 Historial Médico"])
         
-        with tab1:
-            st.subheader("Estado de la Dentadura")
-            st.write("Selecciona un diente para cambiar su estado:")
+        with tab_odonto:
+            st.subheader("Odontograma Digital")
             
-            # Grid de selección para Odontograma
             c1, c2 = st.columns(2)
             with c1:
-                tooth_id = st.number_input("Número de Diente", min_value=1, max_value=32, value=1)
+                tooth_sel = st.number_input("Seleccionar Diente (1-32)", 1, 32, 1)
             with c2:
-                status_options = ["Sano", "Caries", "Tratamiento Pendiente", "Ausente", "Corona"]
-                current_status = st.session_state.teeth_status[tooth_id]
-                new_status = st.selectbox("Estado", status_options, index=status_options.index(current_status))
+                # Obtener estado actual de la DB
+                current_status = get_tooth_status(p_id, tooth_sel)
+                status_opts = ["Sano", "Caries", "Obturado", "Endodoncia", "Ausente"]
                 
-                if new_status != current_status:
-                    update_tooth(tooth_id, new_status)
-                    st.success(f"Diente {tooth_id} actualizado a {new_status}")
-
-            # Visualización simple del odontograma en una tabla
-            teeth_data = [{"Diente": k, "Estado": v} for k, v in st.session_state.teeth_status.items()]
-            df_teeth = pd.DataFrame(teeth_data)
+                new_status = st.selectbox("Estado del Diente", status_opts, index=status_opts.index(current_status) if current_status in status_opts else 0)
+                
+                if st.button("Actualizar Diente"):
+                    update_tooth_status(p_id, tooth_sel, new_status)
+                    st.success("Guardado!")
+                    st.rerun()
             
-            # Usamos colores condicionales en la tabla
-            def color_coding(val):
-                color = 'white'
-                if val == 'Caries': color = '#ffcccb' # Rojo claro
-                elif val == 'Ausente': color = '#d3d3d3' # Gris
-                elif val == 'Tratamiento Pendiente': color = '#add8e6' # Azul claro
-                return f'background-color: {color}'
-
-            st.dataframe(df_teeth.style.map(color_coding, subset=['Estado']), use_container_width=True, height=300)
-
-        with tab2:
-            st.subheader("Historial de Tratamientos")
-            treatment_note = st.text_area("Nueva nota de evolución")
-            if st.button("Guardar Evolución"):
-                new_record = {
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "note": treatment_note,
-                    "doctor": "Dr. Usuario"
-                }
-                patient['history'].append(new_record)
-                st.success("Nota guardada")
-            
-            if patient['history']:
-                for record in patient['history']:
-                    st.text(f"{record['date']} - {record['doctor']}")
-                    st.info(record['note'])
+            # Visualización rápida de dientes modificados
+            st.caption("Resumen de dientes con tratamiento:")
+            teeth_df = pd.read_sql("SELECT tooth_id, status FROM teeth WHERE patient_id = ?", conn, params=(p_id,))
+            if not teeth_df.empty:
+                 # Colores simples para la tabla
+                def color_rows(val):
+                    color = 'white'
+                    if val == 'Caries': color = '#ffcccc'
+                    elif val == 'Obturado': color = '#ccffcc'
+                    elif val == 'Ausente': color = '#eeeeee'
+                    return f'background-color: {color}'
+                
+                st.dataframe(teeth_df.style.map(color_rows, subset=['status']), use_container_width=True)
             else:
-                st.write("No hay historial previo.")
+                st.info("Toda la dentadura registrada como 'Sana'.")
 
-# --- NAVEGACIÓN PRINCIPAL ---
+        with tab_histo:
+            txt_tratamiento = st.text_area("Evolución / Procedimiento realizado hoy:")
+            if st.button("Guardar Nota Clínica"):
+                if txt_tratamiento:
+                    add_history_note(p_id, txt_tratamiento)
+                    st.success("Nota agregada al historial")
+                    st.rerun()
+            
+            st.divider()
+            st.subheader("Historial Previo")
+            history_df = get_patient_history(p_id)
+            if not history_df.empty:
+                for _, row in history_df.iterrows():
+                    st.text(f"📅 {row['date']} | 👨‍⚕️ {row['doctor']}")
+                    st.info(row['treatment'])
+            else:
+                st.write("Sin historial previo.")
 
-# Inicializar vista
+# --- MAIN LOOP ---
+
 if 'view' not in st.session_state:
     st.session_state.view = 'dashboard'
 
-# Sidebar Menu
 with st.sidebar:
-    st.header("DentalCare")
-    selected = st.radio("Navegación", ["Dashboard", "Pacientes", "Agenda"])
+    st.header("🏥 DentalCare SQL")
+    menu = st.radio("Ir a:", ["Dashboard", "Pacientes"])
     
-    # Sincronizar radio button con estado
-    if selected == "Dashboard" and st.session_state.view != 'dashboard':
+    if menu == "Dashboard":
         st.session_state.view = 'dashboard'
-        st.rerun()
-    elif selected == "Pacientes" and st.session_state.view not in ['patients', 'detail']:
+    elif menu == "Pacientes" and st.session_state.view != 'detail':
         st.session_state.view = 'patients'
-        st.rerun()
-    # (Agenda podría implementarse similar)
 
-# Renderizar vistas
 if st.session_state.view == 'dashboard':
     show_dashboard()
 elif st.session_state.view == 'patients':
